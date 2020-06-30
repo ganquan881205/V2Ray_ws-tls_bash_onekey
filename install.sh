@@ -29,7 +29,7 @@ OK="${Green}[OK]${Font}"
 Error="${Red}[错误]${Font}"
 
 # 版本
-shell_version="1.1.3.4"
+shell_version="1.1.5.0"
 shell_mode="None"
 github_branch="master"
 version_cmp="/tmp/version_cmp.tmp"
@@ -49,7 +49,7 @@ v2ray_access_log="/var/log/v2ray/access.log"
 v2ray_error_log="/var/log/v2ray/error.log"
 amce_sh_file="/root/.acme.sh/acme.sh"
 ssl_update_file="/usr/bin/ssl_update.sh"
-nginx_version="1.16.1"
+nginx_version="1.18.0"
 openssl_version="1.1.1g"
 jemalloc_version="5.2.1"
 old_config_status="off"
@@ -58,8 +58,12 @@ old_config_status="off"
 #移动旧版本配置信息 对小于 1.1.0 版本适配
 [[ -f "/etc/v2ray/vmess_qr.json" ]] && mv /etc/v2ray/vmess_qr.json $v2ray_qr_config_file
 
+#简易随机数
+random_num=$((RANDOM%12+4))
 #生成伪装路径
-camouflage="/$(head -n 10 /dev/urandom | md5sum | head -c 8)/"
+camouflage="/$(head -n 10 /dev/urandom | md5sum | head -c ${random_num})/"
+
+THREAD=$(grep 'processor' /proc/cpuinfo | sort -u | wc -l)
 
 source '/etc/os-release'
 
@@ -179,7 +183,7 @@ dependency_install() {
     judge "安装 qrencode"
 
     ${INS} -y install curl
-    judge "安装 crul"
+    judge "安装 curl"
 
     if [[ "${ID}" == "centos" ]]; then
         ${INS} -y groupinstall "Development tools"
@@ -279,6 +283,7 @@ modify_nginx_port() {
         port="$(info_extraction '\"port\"')"
     fi
     sed -i "/ssl http2;$/c \\\tlisten ${port} ssl http2;" ${nginx_conf}
+    sed -i "3c \\\tlisten [::]:${port} http2;" ${nginx_conf}
     judge "V2ray port 修改"
     [ -f ${v2ray_qr_config_file} ] && sed -i "/\"port\"/c \\  \"port\": \"${port}\"," ${v2ray_qr_config_file}
     echo -e "${OK} ${GreenBG} 端口号:${port} ${Font}"
@@ -307,14 +312,12 @@ v2ray_install() {
     fi
     mkdir -p /root/v2ray
     cd /root/v2ray || exit
-    wget -N --no-check-certificate https://install.direct/go.sh
+    wget -N --no-check-certificate https://raw.githubusercontent.com/wulabing/V2Ray_ws-tls_bash_onekey/${github_branch}/v2ray.sh
 
-    ## wget http://install.direct/go.sh
-
-    if [[ -f go.sh ]]; then
+    if [[ -f v2ray.sh ]]; then
         rm -rf $v2ray_systemd_file
         systemctl daemon-reload
-        bash go.sh --force
+        bash v2ray.sh --force
         judge "安装 V2ray"
     else
         echo -e "${Error} ${RedBG} V2ray 安装文件下载失败，请检查下载地址是否可用 ${Font}"
@@ -365,7 +368,7 @@ nginx_install() {
     cd jemalloc-${jemalloc_version} || exit
     ./configure
     judge "编译检查"
-    make && make install
+    make -j "${THREAD}" && make install
     judge "jemalloc 编译安装"
     echo '/usr/local/lib' >/etc/ld.so.conf.d/local.conf
     ldconfig
@@ -389,7 +392,7 @@ nginx_install() {
         --with-ld-opt="-ljemalloc" \
         --with-openssl=../openssl-"$openssl_version"
     judge "编译检查"
-    make && make install
+    make -j "${THREAD}" && make install
     judge "Nginx 编译安装"
 
     # 修改基本配置
@@ -522,6 +525,7 @@ nginx_conf_add() {
     cat >${nginx_conf_dir}/v2ray.conf <<EOF
     server {
         listen 443 ssl http2;
+        listen [::]:443 http2;
         ssl_certificate       /data/v2ray.crt;
         ssl_certificate_key   /data/v2ray.key;
         ssl_protocols         TLSv1.3;
@@ -530,6 +534,13 @@ nginx_conf_add() {
         index index.html index.htm;
         root  /home/wwwroot/3DCEList;
         error_page 400 = /400.html;
+
+        # Config for 0-RTT in TLSv1.3
+        ssl_early_data on;
+        ssl_stapling on;
+        ssl_stapling_verify on;
+        add_header Strict-Transport-Security "max-age=31536000";
+
         location /ray/
         {
         proxy_redirect off;
@@ -540,10 +551,14 @@ nginx_conf_add() {
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host \$http_host;
+
+        # Config for 0-RTT in TLSv1.3
+        proxy_set_header Early-Data \$ssl_early_data;
         }
 }
     server {
         listen 80;
+        listen [::]:80;
         server_name serveraddr.com;
         return 301 https://use.shadowsocksr.win\$request_uri;
     }
@@ -599,14 +614,16 @@ nginx_process_disabled() {
 #}
 acme_cron_update() {
     wget -N -P /usr/bin --no-check-certificate "https://raw.githubusercontent.com/wulabing/V2Ray_ws-tls_bash_onekey/dev/ssl_update.sh"
-    if [[ "${ID}" == "centos" ]]; then
-        #        sed -i "/acme.sh/c 0 3 * * 0 \"/root/.acme.sh\"/acme.sh --cron --home \"/root/.acme.sh\" \
-        #        &> /dev/null" /var/spool/cron/root
-        sed -i "/acme.sh/c 0 3 * * 0 bash ${ssl_update_file}" /var/spool/cron/root
-    else
-        #        sed -i "/acme.sh/c 0 3 * * 0 \"/root/.acme.sh\"/acme.sh --cron --home \"/root/.acme.sh\" \
-        #        &> /dev/null" /var/spool/cron/crontabs/root
-        sed -i "/acme.sh/c 0 3 * * 0 bash ${ssl_update_file}" /var/spool/cron/crontabs/root
+    if [[ $(crontab -l | grep -c "ssl_update.sh") -lt 1 ]]; then
+      if [[ "${ID}" == "centos" ]]; then
+          #        sed -i "/acme.sh/c 0 3 * * 0 \"/root/.acme.sh\"/acme.sh --cron --home \"/root/.acme.sh\" \
+          #        &> /dev/null" /var/spool/cron/root
+          sed -i "/acme.sh/c 0 3 * * 0 bash ${ssl_update_file}" /var/spool/cron/root
+      else
+          #        sed -i "/acme.sh/c 0 3 * * 0 \"/root/.acme.sh\"/acme.sh --cron --home \"/root/.acme.sh\" \
+          #        &> /dev/null" /var/spool/cron/crontabs/root
+          sed -i "/acme.sh/c 0 3 * * 0 bash ${ssl_update_file}" /var/spool/cron/crontabs/root
+      fi
     fi
     judge "cron 计划任务更新"
 }
@@ -655,6 +672,32 @@ vmess_qr_link_image() {
     } >>"${v2ray_info_file}"
 }
 
+vmess_quan_link_image() {
+    echo "$(info_extraction '\"ps\"') = vmess, $(info_extraction '\"add\"'), \
+    $(info_extraction '\"port\"'), chacha20-ietf-poly1305, "\"$(info_extraction '\"id\"')\"", over-tls=true, \
+    certificate=1, obfs=ws, obfs-path="\"$(info_extraction '\"path\"')\"", " > /tmp/vmess_quan.tmp
+    vmess_link="vmess://$(base64 -w 0 /tmp/vmess_quan.tmp)"
+    {
+        echo -e "$Red 二维码: $Font"
+        echo -n "${vmess_link}" | qrencode -o - -t utf8
+        echo -e "${Red} URL导入链接:${vmess_link} ${Font}"
+    } >>"${v2ray_info_file}"
+}
+
+vmess_link_image_choice() {
+        echo "请选择生成的链接种类"
+        echo "1: V2RayNG/V2RayN"
+        echo "2: quantumult"
+        read -rp "请输入：" link_version
+        [[ -z ${link_version} ]] && link_version=1
+        if [[ $link_version == 1 ]]; then
+            vmess_qr_link_image
+        elif [[ $link_version == 2 ]]; then
+            vmess_quan_link_image
+        else
+            vmess_qr_link_image
+        fi
+}
 info_extraction() {
     grep "$1" $v2ray_qr_config_file | awk -F '"' '{print $4}'
 }
@@ -764,11 +807,10 @@ ssl_update_manuel() {
 }
 bbr_boost_sh() {
     [ -f "tcp.sh" ] && rm -rf ./tcp.sh
-    wget -N --no-check-certificate "https://github.com/ylx2016/Linux-NetSpeed/releases/download/sh/tcp.sh" && chmod +x tcp.sh && ./tcp.sh
+    wget -N --no-check-certificate "https://raw.githubusercontent.com/ylx2016/Linux-NetSpeed/master/tcp.sh" && chmod +x tcp.sh && ./tcp.sh
 }
 mtproxy_sh() {
-    [ -f "mtproxy_go.sh" ] && rm -rf ./mtproxy_go.sh
-    wget -N --no-check-certificate https://github.com/whunt1/onekeymakemtg/raw/master/mtproxy_go.sh && chmod +x mtproxy_go.sh && ./mtproxy_go.sh
+    echo -e "${Error} ${RedBG} 功能维护，暂不可用 ${Font}"
 }
 
 uninstall_all() {
@@ -827,7 +869,7 @@ install_v2ray_ws_tls() {
     nginx_systemd
     vmess_qr_config_tls_ws
     basic_information
-    vmess_qr_link_image
+    vmess_link_image_choice
     tls_type
     show_information
     start_process_systemd
@@ -946,7 +988,7 @@ menu() {
         install_v2_h2
         ;;
     3)
-        bash <(curl -L -s https://install.direct/go.sh)
+        bash <(curl -L -s https://raw.githubusercontent.com/wulabing/V2Ray_ws-tls_bash_onekey/${github_branch}/v2ray.sh)
         ;;
     4)
         read -rp "请输入UUID:" UUID
@@ -978,7 +1020,11 @@ menu() {
         ;;
     10)
         basic_information
-        vmess_qr_link_image
+        if [[ $shell_mode == "ws" ]]; then
+            vmess_link_image_choice
+        else
+            vmess_qr_link_image
+        fi
         show_information
         ;;
     11)
